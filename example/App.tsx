@@ -38,7 +38,7 @@ import {
 	View,
 } from "react-native";
 
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 
 const originalConsoleError = console.error;
 console.error = (...args: unknown[]) => {
@@ -604,8 +604,9 @@ export default function App() {
 	};
 
 	return (
-		<SafeAreaView style={styles.container}>
-			<ScrollView style={styles.container}>
+		<SafeAreaProvider>
+			<SafeAreaView style={styles.container}>
+				<ScrollView style={styles.container}>
 				<Text style={styles.header}>Stream Audio Demo App</Text>
 				<Text style={styles.subheader}>
 					expo-stream-audio + ElevenLabs Scribe v2 Realtime
@@ -797,8 +798,9 @@ export default function App() {
 						</Group>
 					</>
 				)}
-			</ScrollView>
-		</SafeAreaView>
+				</ScrollView>
+			</SafeAreaView>
+		</SafeAreaProvider>
 	);
 }
 
