@@ -9,11 +9,12 @@
     "web": "expo start --web"
   },
   "dependencies": {
+    "@elevenlabs/client": "0.11.0",
     "expo": "~54.0.25",
+    "expo-stream-audio": "^0.1.2",
     "react": "19.1.0",
     "react-native": "0.81.5",
-    "expo-stream-audio": "^0.1.2",
-    "@elevenlabs/client": "0.11.0"
+    "react-native-safe-area-context": "^5.6.2"
   },
   "devDependencies": {
     "@types/react": "~19.1.0",

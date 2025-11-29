@@ -1,7 +1,6 @@
 import {
 	AudioFormat,
 	CommitStrategy,
-	type CommittedTranscriptMessage,
 	type CommittedTranscriptWithTimestampsMessage,
 	type PartialTranscriptMessage,
 	type RealtimeConnection,
@@ -26,15 +25,50 @@ import {
 } from "expo-stream-audio";
 import { useEffect, useRef, useState } from "react";
 import {
+	ActivityIndicator,
+	Animated,
 	AppState,
-	Button,
+	Dimensions,
 	PermissionsAndroid,
 	Platform,
-	SafeAreaView,
+	Pressable,
 	ScrollView,
+	StyleSheet,
 	Text,
 	View,
 } from "react-native";
+
+import { SafeAreaView } from "react-native-safe-area-context";
+
+const originalConsoleError = console.error;
+console.error = (...args: unknown[]) => {
+	const [first] = args;
+	if (
+		typeof first === "string" &&
+		first.startsWith("WebSocket closed unexpectedly: 1000")
+	) {
+		// Swallow noisy clean-close logs from the WebSocket layer.
+		return;
+	}
+	// Forward all other errors to the original console for debug tooling.
+	originalConsoleError(...args);
+};
+
+declare const process: {
+	env?: Record<string, string | undefined>;
+};
+
+type Tab = "realtime" | "transcript" | "debug";
+
+type CommittedSegment = {
+	id: string;
+	text: string;
+	speakerId?: string;
+	startSeconds?: number;
+};
+
+const { height: WINDOW_HEIGHT } = Dimensions.get("window");
+const TRANSCRIPT_HEIGHT = Math.round(WINDOW_HEIGHT * 0.5);
 
 export default function App() {
 	const [streamStatusLabel, setStreamStatusLabel] = useState("idle");
@@ -46,15 +80,14 @@ export default function App() {
 	} | null>(null);
 	const [logMessage, setLogMessage] = useState<string | null>(null);
 	const [partialTranscript, setPartialTranscript] = useState<string>("");
-	const [committedTranscripts, setCommittedTranscripts] = useState<string[]>(
-		[],
-	);
+	const [committedTranscripts, setCommittedTranscripts] = useState<
+		CommittedSegment[]
+	>([]);
 	const [scribeStatus, setScribeStatus] = useState<
 		"disconnected" | "connected" | "error"
 	>("disconnected");
-	const [bufferedSegments, setBufferedSegments] = useState<
-		BufferedAudioSegment[]
-	>([]);
+	const [isStarting, setIsStarting] = useState(false);
+	const [activeTab, setActiveTab] = useState<Tab>("realtime");
 
 	const frameCountRef = useRef(0);
 	const scribeConnectionRef = useRef<RealtimeConnection | null>(null);
@@ -63,10 +96,12 @@ export default function App() {
 	const shouldReconnectRef = useRef(false);
 	const isProcessingBufferedRef = useRef(false);
 	const appStateRef = useRef(AppState.currentState);
+	const transcriptScrollRef = useRef<ScrollView | null>(null);
 
 	const frameSubRef = useRef<{ remove: () => void } | null>(null);
 	const errorSubRef = useRef<{ remove: () => void } | null>(null);
 
+	// biome-ignore lint/correctness/useExhaustiveDependencies: reconnectAndProcessBuffered uses refs only and is safe here.
 	useEffect(() => {
 		const appStateSubscription = AppState.addEventListener(
 			"change",
@@ -79,10 +114,6 @@ export default function App() {
 					nextState === "active"
 				) {
 					if (shouldReconnectRef.current) {
-						// eslint-disable-next-line no-console
-						console.log(
-							"App foregrounded, reconnecting Scribe and processing buffered segments",
-						);
 						void reconnectAndProcessBuffered();
 					}
 				}
@@ -107,20 +138,29 @@ export default function App() {
 				scribeConnectionRef.current = null;
 				scribeReadyRef.current = false;
 			}
-			stop().catch((error) => {
-				console.warn("Failed to stop mic stream on cleanup", error);
-			});
+			stop().catch(() => {});
 		};
 	}, []);
 
+	// biome-ignore lint/correctness/useExhaustiveDependencies: this effect intentionally runs when transcript content changes to auto-scroll.
+	useEffect(() => {
+		if (transcriptScrollRef.current) {
+			transcriptScrollRef.current.scrollToEnd({ animated: true });
+		}
+	}, [committedTranscripts.length, partialTranscript]);
+
 	// WARNING: only use this in local testing.
 	// Do NOT commit a real API key.
-	const ELEVENLABS_API_KEY =
-		"sk_1e09f32c548e384d6f104b28e03caa3b770e2601b7c35022";
+	// Prefer an EXPO_PUBLIC_ELEVENLABS_API_KEY environment variable when available.
+	// For local testing you can also hard‑code a test key here, but NEVER commit a real key.
+	const ELEVENLABS_API_KEY = process.env?.EXPO_PUBLIC_ELEVENLABS_API_KEY ?? "";
+	const hasApiKey = !!ELEVENLABS_API_KEY;
 
 	const fetchScribeToken = async (): Promise<string> => {
 		if (!ELEVENLABS_API_KEY) {
-			throw new Error("Set ELEVENLABS_API_KEY in App.tsx before testing.");
+			throw new Error(
+				"Set EXPO_PUBLIC_ELEVENLABS_API_KEY (see .env.example) before testing.",
+			);
 		}
 
 		const response = await fetch(
@@ -151,15 +191,11 @@ export default function App() {
 
 	const attachScribeListeners = (connection: RealtimeConnection) => {
 		connection.on(RealtimeEvents.OPEN, () => {
-			// eslint-disable-next-line no-console
-			console.log("Scribe OPEN");
 			scribeReadyRef.current = true;
 			setScribeStatus("connected");
 		});
 
 		connection.on(RealtimeEvents.SESSION_STARTED, () => {
-			// eslint-disable-next-line no-console
-			console.log("Scribe SESSION_STARTED");
 			scribeReadyRef.current = true;
 			setScribeStatus("connected");
 		});
@@ -169,8 +205,6 @@ export default function App() {
 			if (!data?.text) {
 				return;
 			}
-			// eslint-disable-next-line no-console
-			console.log("Scribe PARTIAL", data);
 			setPartialTranscript(data.text);
 			setScribeStatus("connected");
 		});
@@ -182,9 +216,25 @@ export default function App() {
 				if (!data?.text) {
 					return;
 				}
-				// eslint-disable-next-line no-console
-				console.log("Scribe COMMITTED_WITH_TIMESTAMPS", data);
-				setCommittedTranscripts((prev) => [...prev, data.text ?? ""]);
+				const firstWordWithStart =
+					data.words?.find(
+						(word) => word.type === "word" && typeof word.start === "number",
+					) ?? null;
+				const firstWordWithSpeaker =
+					data.words?.find(
+						(word) =>
+							word.type === "word" && typeof word.speaker_id === "string",
+					) ?? null;
+				const segment: CommittedSegment = {
+					id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+					text: data.text ?? "",
+					speakerId: firstWordWithSpeaker?.speaker_id,
+					startSeconds:
+						typeof firstWordWithStart?.start === "number"
+							? firstWordWithStart.start
+							: undefined,
+				};
+				setCommittedTranscripts((prev) => [...prev, segment]);
 				setPartialTranscript("");
 				setScribeStatus("connected");
 			},
@@ -197,8 +247,24 @@ export default function App() {
 				// Ignore errors emitted as part of an intentional shutdown.
 				return;
 			}
-			// eslint-disable-next-line no-console
-			console.error("Scribe ERROR", message);
+
+			// Treat clean WebSocket closes (code 1000) as a normal disconnect,
+			// not as a hard error.
+			if (
+				typeof message === "string" &&
+				message.includes("WebSocket closed unexpectedly") &&
+				message.includes("1000")
+			) {
+				setScribeStatus("disconnected");
+				return;
+			}
+
+			// Some SDK versions emit a generic "Scribe error" message after a clean close.
+			// Treat that as non-fatal so it doesn't surface as an error in the UI.
+			if (message === "Scribe error") {
+				return;
+			}
+
 			setLogMessage(message);
 			setScribeStatus("error");
 		});
@@ -206,8 +272,6 @@ export default function App() {
 		connection.on(RealtimeEvents.AUTH_ERROR, (...args: unknown[]) => {
 			const [data] = args as [ScribeAuthErrorMessage];
 			const message = data?.error ?? "Scribe auth error";
-			// eslint-disable-next-line no-console
-			console.error("Scribe AUTH_ERROR", message);
 			setLogMessage(message);
 			setScribeStatus("error");
 		});
@@ -215,17 +279,27 @@ export default function App() {
 		connection.on(RealtimeEvents.QUOTA_EXCEEDED, (...args: unknown[]) => {
 			const [data] = args as [ScribeQuotaExceededErrorMessage];
 			const message = data?.error ?? "Scribe quota exceeded";
-			// eslint-disable-next-line no-console
-			console.error("Scribe QUOTA_EXCEEDED", message);
 			setLogMessage(message);
 			setScribeStatus("error");
 		});
 
 		connection.on(RealtimeEvents.CLOSE, (...args: unknown[]) => {
 			const [event] = args as [unknown];
-			// eslint-disable-next-line no-console
-			console.log("Scribe CLOSE", event);
+			const closeEvent = event as
+				| { code?: number; reason?: string; wasClean?: boolean }
+				| undefined;
 			scribeReadyRef.current = false;
+
+			// Treat clean 1000 close as an informational disconnect, not an error.
+			if (closeEvent?.code === 1000) {
+				setScribeStatus("disconnected");
+				shouldReconnectRef.current = false;
+				if (!stoppedManuallyRef.current) {
+					setLogMessage("Scribe connection closed cleanly.");
+				}
+				return;
+			}
+
 			if (stoppedManuallyRef.current) {
 				setScribeStatus("disconnected");
 				shouldReconnectRef.current = false;
@@ -234,8 +308,9 @@ export default function App() {
 				shouldReconnectRef.current = true;
 				// Enable native buffering for the period where realtime is unavailable.
 				setBufferingEnabled(true).catch((error) => {
-					// eslint-disable-next-line no-console
-					console.error("Failed to enable buffering", error);
+					setLogMessage(
+						`Failed to enable buffering: ${(error as Error)?.message ?? "Unknown error"}`,
+					);
 				});
 				setLogMessage(
 					"Scribe disconnected; buffering audio and will reconnect/process buffered when app is active.",
@@ -262,11 +337,8 @@ export default function App() {
 			modelId: "scribe_v2_realtime",
 			audioFormat: AudioFormat.PCM_16000,
 			sampleRate: 16000,
+			// Use Scribe's default VAD tuning, but still rely on VAD-based commits.
 			commitStrategy: CommitStrategy.VAD,
-			vadSilenceThresholdSecs: 0.5,
-			vadThreshold: 0.35,
-			minSpeechDurationMs: 120,
-			minSilenceDurationMs: 90,
 			includeTimestamps: true,
 		});
 
@@ -286,15 +358,6 @@ export default function App() {
 			level: event.level,
 		});
 
-		if (frameCountRef.current % 50 === 0) {
-			// eslint-disable-next-line no-console
-			console.log("Mic frame", {
-				index: frameCountRef.current,
-				timestamp: event.timestamp,
-				level: event.level,
-			});
-		}
-
 		const connection = scribeConnectionRef.current;
 		if (connection && scribeReadyRef.current) {
 			try {
@@ -302,61 +365,73 @@ export default function App() {
 					audioBase64: event.pcmBase64,
 					sampleRate: event.sampleRate,
 				});
-			} catch (error) {
-				// eslint-disable-next-line no-console
-				console.error("Failed to send audio to Scribe", error);
+			} catch {
+				// ignore send errors; they'll be surfaced via Scribe events if needed
 			}
 		}
 	};
 
 	const handleStart = async () => {
+		if (isStarting) {
+			return;
+		}
+
+		if (!ELEVENLABS_API_KEY) {
+			setLogMessage(
+				"Set EXPO_PUBLIC_ELEVENLABS_API_KEY (see .env.example) before starting Scribe realtime.",
+			);
+			return;
+		}
+
 		stoppedManuallyRef.current = false;
 		shouldReconnectRef.current = false;
 		setLogMessage(null);
 
-		let permission = await requestPermission();
-
-		if (Platform.OS === "android" && permission !== "granted") {
-			try {
-				const result = await PermissionsAndroid.request(
-					PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-				);
-				if (result === PermissionsAndroid.RESULTS.GRANTED) {
-					permission = "granted";
-				} else {
-					setLogMessage("Android microphone permission denied.");
-					return;
-				}
-			} catch (error) {
-				setLogMessage(
-					`Failed to request Android mic permission: ${(error as Error)?.message ?? "Unknown error"}`,
-				);
-				return;
-			}
-		}
-
-		if (Platform.OS === "ios" && permission === "undetermined") {
-			permission = "granted";
-		}
-
-		if (permission !== "granted") {
-			setLogMessage(`Microphone permission not granted: ${permission}`);
-			return;
-		}
-
-		// Reset Scribe state
-		setPartialTranscript("");
-		setCommittedTranscripts([]);
-
-		frameSubRef.current?.remove();
-		errorSubRef.current?.remove();
-
-		frameSubRef.current = addFrameListener(handleFrame);
-		errorSubRef.current = addErrorListener((event) => {
-			setLogMessage(event.message);
-		});
+		setIsStarting(true);
 
 		try {
+			let permission = await requestPermission();
+
+			if (Platform.OS === "android" && permission !== "granted") {
+				try {
+					const result = await PermissionsAndroid.request(
+						PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+					);
+					if (result === PermissionsAndroid.RESULTS.GRANTED) {
+						permission = "granted";
+					} else {
+						setLogMessage("Android microphone permission denied.");
+						return;
+					}
+				} catch (error) {
+					setLogMessage(
+						`Failed to request Android mic permission: ${(error as Error)?.message ?? "Unknown error"}`,
+					);
+					return;
+				}
+			}
+
+			if (Platform.OS === "ios" && permission === "undetermined") {
+				permission = "granted";
+			}
+
+			if (permission !== "granted") {
+				setLogMessage(`Microphone permission not granted: ${permission}`);
+				return;
+			}
+
+			// Reset Scribe state
+			setPartialTranscript("");
+			setCommittedTranscripts([]);
+
+			frameSubRef.current?.remove();
+			errorSubRef.current?.remove();
+
+			frameSubRef.current = addFrameListener(handleFrame);
+			errorSubRef.current = addErrorListener((event) => {
+				setLogMessage(event.message);
+			});
+
 			await createScribeConnection();
 
 			await start({
@@ -372,11 +447,13 @@ export default function App() {
 
 			setStreamStatusLabel("recording");
 			setScribeStatus("connected");
+			setActiveTab("transcript");
 		} catch (error) {
 			setLogMessage(
 				`Failed to start stream: ${(error as Error)?.message ?? "Unknown error"}`,
 			);
-			return;
+		} finally {
+			setIsStarting(false);
 		}
 	};
 
@@ -420,11 +497,11 @@ export default function App() {
 	};
 
 	const transcribeBufferedSegment = async (
-		segment: BufferedAudioSegment,
+		bufferSegment: BufferedAudioSegment,
 	): Promise<string | null> => {
 		if (!ELEVENLABS_API_KEY) {
 			throw new Error(
-				"Set ELEVENLABS_API_KEY in App.tsx before testing buffered transcription.",
+				"Set EXPO_PUBLIC_ELEVENLABS_API_KEY (see .env.example) before testing buffered transcription.",
 			);
 		}
 
@@ -433,8 +510,8 @@ export default function App() {
 		const form = new FormData();
 		form.append("file", {
 			// React Native understands file uploads via `uri`
-			uri: segment.uri,
-			name: `segment-${segment.id}.wav`,
+			uri: bufferSegment.uri,
+			name: `segment-${bufferSegment.id}.wav`,
 			type: "audio/wav",
 		} as unknown as Blob);
 		form.append("model_id", "scribe_v2"); // Adjust if ElevenLabs uses a different identifier
@@ -464,18 +541,14 @@ export default function App() {
 		return json.text;
 	};
 
-	const refreshBufferedSegments = async () => {
-		try {
-			const segments = await getBufferedSegments();
-			setBufferedSegments(segments);
-		} catch (error) {
-			setLogMessage(
-				`Failed to load buffered segments: ${(error as Error)?.message ?? "Unknown error"}`,
-			);
-		}
-	};
-
 	const processBufferedSegments = async () => {
+		if (!ELEVENLABS_API_KEY) {
+			setLogMessage(
+				"Set EXPO_PUBLIC_ELEVENLABS_API_KEY (see .env.example) before processing buffered segments.",
+			);
+			return;
+		}
+
 		if (isProcessingBufferedRef.current) {
 			return;
 		}
@@ -483,7 +556,6 @@ export default function App() {
 
 		try {
 			const segments = await getBufferedSegments();
-			setBufferedSegments(segments);
 
 			if (!segments.length) {
 				return;
@@ -491,19 +563,15 @@ export default function App() {
 
 			for (const segment of segments) {
 				try {
-					// eslint-disable-next-line no-console
-					console.log("Processing buffered segment", segment);
 					const text = await transcribeBufferedSegment(segment);
 					if (text && text.length > 0) {
-						setCommittedTranscripts((prev) => [...prev, text]);
+						const committed: CommittedSegment = {
+							id: `buffered-${segment.id}-${Date.now()}`,
+							text,
+						};
+						setCommittedTranscripts((prev) => [...prev, committed]);
 					}
 				} catch (error) {
-					// eslint-disable-next-line no-console
-					console.error(
-						"Failed to transcribe buffered segment",
-						segment.id,
-						error,
-					);
 					setLogMessage(
 						`Failed buffered segment ${segment.id}: ${(error as Error)?.message ?? "Unknown error"}`,
 					);
@@ -511,7 +579,6 @@ export default function App() {
 			}
 
 			await clearBufferedSegments();
-			setBufferedSegments([]);
 		} catch (error) {
 			setLogMessage(
 				`Failed to process buffered segments: ${(error as Error)?.message ?? "Unknown error"}`,
@@ -539,83 +606,181 @@ export default function App() {
 	return (
 		<SafeAreaView style={styles.container}>
 			<ScrollView style={styles.container}>
-				<Text style={styles.header}>expo-stream-audio: Mic Stream Test</Text>
+				<Text style={styles.header}>Stream Audio Demo App</Text>
+				<Text style={styles.subheader}>
+					expo-stream-audio + ElevenLabs Scribe v2 Realtime
+				</Text>
 
-				<Group name="Controls">
-					<Text style={styles.label}>Status: {streamStatusLabel}</Text>
-					{streamStatusLabel === "recording" ? (
-						<Button title="Stop stream" onPress={handleStop} />
-					) : (
-						<Button title="Start stream" onPress={handleStart} />
-					)}
-				</Group>
+				<View style={styles.tabBar}>
+					<TabButton
+						label="Realtime"
+						isActive={activeTab === "realtime"}
+						onPress={() => setActiveTab("realtime")}
+					/>
+					<TabButton
+						label="Transcript"
+						isActive={activeTab === "transcript"}
+						onPress={() => setActiveTab("transcript")}
+					/>
+					<TabButton
+						label="Debug"
+						isActive={activeTab === "debug"}
+						onPress={() => setActiveTab("debug")}
+					/>
+				</View>
 
-				<Group name="Last frame">
-					{lastFrame ? (
-						<>
-							<Text>Sample rate: {lastFrame.sampleRate} Hz</Text>
-							<Text>Base64 length: {lastFrame.length}</Text>
-							<Text>
-								Timestamp: {new Date(lastFrame.timestamp).toLocaleTimeString()}
-							</Text>
-							{typeof lastFrame.level === "number" ? (
-								<Text>Level (RMS): {lastFrame.level.toFixed(6)}</Text>
-							) : null}
-						</>
-					) : (
-						<Text>No frames yet. Press “Start stream”.</Text>
-					)}
-				</Group>
-
-				<Group name="Scribe transcript">
-					<Text>Status: {scribeStatus}</Text>
-					<View style={styles.transcriptContainer}>
-						<ScrollView nestedScrollEnabled>
-							{partialTranscript ? (
-								<Text>Live: {partialTranscript}</Text>
+				{activeTab === "realtime" && (
+					<>
+						<Group name={hasApiKey ? "Setup complete" : "Setup"}>
+							{hasApiKey ? (
+								<View style={styles.setupSuccessRow}>
+									<Text style={styles.successIcon}>✓</Text>
+									<Text style={styles.successText}>API key detected</Text>
+								</View>
 							) : (
-								<Text>No partial transcript yet.</Text>
-							)}
-							{committedTranscripts.length > 0 ? (
 								<>
-									<Text>Committed:</Text>
-									{committedTranscripts.map((text, idx) => (
-										<Text key={`${idx}-${text}`}>{text}</Text>
-									))}
+									<Text style={styles.label}>
+										To test Scribe, copy{" "}
+										<Text style={styles.code}>.env.example</Text> to{" "}
+										<Text style={styles.code}>.env</Text> and set{" "}
+										<Text style={styles.code}>
+											EXPO_PUBLIC_ELEVENLABS_API_KEY
+										</Text>{" "}
+										to your ElevenLabs API key. For local testing you can also
+										hard‑code a key in <Text style={styles.code}>App.tsx</Text>,
+										but never commit a real key.
+									</Text>
+									<Text style={styles.warningText}>
+										Realtime transcription is disabled until you set an API key.
+									</Text>
 								</>
-							) : null}
-						</ScrollView>
-					</View>
-				</Group>
+							)}
+						</Group>
 
-				<Group name="Buffered segments">
-					<Button
-						title="Refresh buffered segments"
-						onPress={refreshBufferedSegments}
-					/>
-					<Button
-						title="Process buffered segments now"
-						onPress={processBufferedSegments}
-					/>
-					{bufferedSegments.length > 0 ? (
-						<>
-							<Text>Buffered count: {bufferedSegments.length}</Text>
-							{bufferedSegments.map((segment) => (
-								<Text key={segment.id}>
-									{new Date(segment.startTimestamp).toLocaleTimeString()} –{" "}
-									{Math.round(segment.durationMs / 1000)}s –{" "}
-									{Math.round(segment.sizeBytes / 1024)} KB
+						<Group name="Realtime controls">
+							<View style={styles.statusRow}>
+								<Text style={styles.statusLabel}>Mic</Text>
+								<Text style={styles.statusColon}>:</Text>
+								<StatusBadge
+									label={streamStatusLabel}
+									tone={streamStatusLabel === "recording" ? "ok" : "idle"}
+								/>
+
+								<View style={styles.statusSpacer} />
+
+								<Text style={styles.statusLabel}>Scribe</Text>
+								<Text style={styles.statusColon}>:</Text>
+								<StatusBadge
+									label={scribeStatus}
+									tone={
+										scribeStatus === "connected"
+											? "ok"
+											: scribeStatus === "error"
+												? "error"
+												: "idle"
+									}
+								/>
+							</View>
+
+							{streamStatusLabel === "recording" ? (
+								<PrimaryButton
+									title="Stop Stream"
+									onPress={handleStop}
+									disabled={isStarting}
+								/>
+							) : (
+								<PrimaryButton
+									title="Start Stream"
+									onPress={handleStart}
+									disabled={!hasApiKey || isStarting}
+									loading={isStarting}
+								/>
+							)}
+						</Group>
+					</>
+				)}
+
+				{activeTab === "transcript" && (
+					<>
+						<LiveIndicator
+							isLive={
+								streamStatusLabel === "recording" &&
+								scribeStatus === "connected"
+							}
+						/>
+						<Group name="">
+							<View style={styles.transcriptContainer}>
+								<ScrollView nestedScrollEnabled ref={transcriptScrollRef}>
+									{committedTranscripts.map((segment) => (
+										<View key={segment.id} style={styles.segmentRow}>
+											<View style={styles.segmentLine}>
+												{segment.startSeconds != null && (
+													<Text style={styles.segmentMeta}>
+														{formatSeconds(segment.startSeconds)}
+													</Text>
+												)}
+												{segment.speakerId != null && (
+													<Text style={styles.segmentSpeaker}>
+														{formatSpeaker(segment.speakerId)}
+													</Text>
+												)}
+												<Text style={styles.segmentText}>{segment.text}</Text>
+											</View>
+										</View>
+									))}
+
+									{partialTranscript ? (
+										<View style={styles.segmentRow}>
+											<View style={styles.segmentLine}>
+												<Text style={styles.segmentTextPartial}>
+													{partialTranscript}
+												</Text>
+											</View>
+										</View>
+									) : null}
+
+									{committedTranscripts.length === 0 && !partialTranscript ? (
+										<Text style={styles.mutedLabel}>No transcript yet.</Text>
+									) : null}
+								</ScrollView>
+							</View>
+						</Group>
+					</>
+				)}
+
+				{activeTab === "debug" && (
+					<>
+						<Group name="Mic debug">
+							{lastFrame ? (
+								<>
+									<Text>Sample rate: {lastFrame.sampleRate} Hz</Text>
+									<Text>
+										Timestamp:{" "}
+										{new Date(lastFrame.timestamp).toLocaleTimeString()}
+									</Text>
+									{typeof lastFrame.level === "number" ? (
+										<LevelMeter level={lastFrame.level} />
+									) : null}
+								</>
+							) : (
+								<Text style={styles.mutedLabel}>
+									No frames yet. Press “Start stream”.
 								</Text>
-							))}
-						</>
-					) : (
-						<Text>No buffered segments.</Text>
-					)}
-				</Group>
+							)}
+						</Group>
 
-				<Group name="Log">
-					<Text>{logMessage ?? "No errors."}</Text>
-				</Group>
+						<Group name="Log">
+							<Text>{logMessage ?? "No errors."}</Text>
+						</Group>
+
+						<Group name="Buffered audio behavior">
+							<Text style={styles.mutedLabel}>
+								When Scribe disconnects unexpectedly, audio is buffered natively
+								as WAV files and processed when a connection is available again.
+							</Text>
+						</Group>
+					</>
+				)}
 			</ScrollView>
 		</SafeAreaView>
 	);
@@ -624,36 +789,182 @@ export default function App() {
 function Group(props: { name: string; children: React.ReactNode }) {
 	return (
 		<View style={styles.group}>
-			<Text style={styles.groupHeader}>{props.name}</Text>
+			{props.name ? <Text style={styles.groupHeader}>{props.name}</Text> : null}
 			<View style={styles.groupBody}>{props.children}</View>
 		</View>
 	);
 }
 
-const styles = {
+function TabButton(props: {
+	label: string;
+	isActive: boolean;
+	onPress: () => void;
+}) {
+	return (
+		<Pressable
+			onPress={props.onPress}
+			style={[styles.tabButton, props.isActive ? styles.tabButtonActive : null]}
+		>
+			<Text
+				style={[
+					styles.tabButtonLabel,
+					props.isActive ? styles.tabButtonLabelActive : null,
+				]}
+			>
+				{props.label}
+			</Text>
+		</Pressable>
+	);
+}
+
+function StatusBadge(props: { label: string; tone: "idle" | "ok" | "error" }) {
+	const toneStyle =
+		props.tone === "ok"
+			? styles.statusBadgeOk
+			: props.tone === "error"
+				? styles.statusBadgeError
+				: styles.statusBadgeIdle;
+
+	return (
+		<View style={[styles.statusBadge, toneStyle]}>
+			<Text style={styles.statusBadgeText}>{props.label}</Text>
+		</View>
+	);
+}
+
+function PrimaryButton(props: {
+	title: string;
+	onPress: () => void;
+	disabled?: boolean;
+	loading?: boolean;
+}) {
+	const isDisabled = props.disabled || props.loading;
+	return (
+		<Pressable
+			onPress={props.onPress}
+			disabled={isDisabled}
+			style={[
+				styles.primaryButton,
+				isDisabled ? styles.primaryButtonDisabled : null,
+			]}
+		>
+			{props.loading ? (
+				<ActivityIndicator color="#f9fafb" />
+			) : (
+				<Text style={styles.primaryButtonText}>{props.title}</Text>
+			)}
+		</Pressable>
+	);
+}
+
+function LiveIndicator(props: { isLive: boolean }) {
+	const scale = useRef(new Animated.Value(1)).current;
+
+	useEffect(() => {
+		let loop: Animated.CompositeAnimation | null = null;
+
+		if (props.isLive) {
+			loop = Animated.loop(
+				Animated.sequence([
+					Animated.timing(scale, {
+						toValue: 1.3,
+						duration: 600,
+						useNativeDriver: true,
+					}),
+					Animated.timing(scale, {
+						toValue: 1,
+						duration: 600,
+						useNativeDriver: true,
+					}),
+				]),
+			);
+			loop.start();
+		} else {
+			scale.setValue(1);
+		}
+
+		return () => {
+			if (loop) {
+				loop.stop();
+			}
+		};
+	}, [props.isLive, scale]);
+
+	const dotTone = props.isLive ? styles.liveDotOn : styles.liveDotOff;
+	const textStyle = props.isLive ? styles.liveTextOn : styles.liveTextOff;
+	const label = props.isLive ? "Streaming live" : "Not streaming";
+
+	return (
+		<View style={styles.liveRow}>
+			<Animated.View
+				style={[styles.liveDot, dotTone, { transform: [{ scale }] }]}
+			/>
+			<Text style={textStyle}>{label}</Text>
+		</View>
+	);
+}
+
+function formatSeconds(value: number): string {
+	const total = Math.max(0, Math.floor(value));
+	const minutes = Math.floor(total / 60);
+	const seconds = total % 60;
+	return `${minutes.toString().padStart(2, "0")}:${seconds
+		.toString()
+		.padStart(2, "0")}`;
+}
+
+function formatSpeaker(rawId: string): string {
+	const short = rawId.length > 8 ? rawId.slice(0, 8) : rawId;
+	return `Speaker ${short}`;
+}
+
+function LevelMeter(props: { level: number }) {
+	// Scale RMS (usually very small) to a more readable 0–100% range.
+	const clamped = Math.max(0, Math.min(props.level, 1));
+	const scaled = Math.min(clamped * 10, 1); // 10x boost, capped at 100%
+	const percent = Math.round(scaled * 100);
+
+	return (
+		<View style={styles.levelCard}>
+			<Text style={styles.mutedLabel}>RMS level</Text>
+			<View style={styles.levelBarBackground}>
+				<View style={[styles.levelBarFill, { width: `${percent}%` }]} />
+			</View>
+			<Text style={styles.levelPercent}>{percent}%</Text>
+		</View>
+	);
+}
+
+const styles = StyleSheet.create({
 	header: {
 		fontSize: 30,
-		margin: 20,
+		marginTop: 32,
+		marginHorizontal: 20,
+		marginBottom: 6,
+		textAlign: "center",
+	},
+	subheader: {
+		marginHorizontal: 24,
+		marginBottom: 20,
+		color: "#6b7280",
+		textAlign: "center",
 	},
 	groupHeader: {
 		fontSize: 20,
 		marginBottom: 20,
 	},
 	group: {
-		margin: 20,
+		marginHorizontal: 20,
+		marginVertical: 10,
 		backgroundColor: "#fff",
 		borderRadius: 10,
-		padding: 20,
+		padding: 12,
 	},
 	groupBody: {
-		gap: 8,
+		// simple vertical spacing; adjust via margins as needed
 	},
 	transcriptContainer: {
-		maxHeight: 200,
-		borderWidth: 1,
-		borderColor: "#ddd",
-		borderRadius: 8,
-		padding: 8,
+		height: TRANSCRIPT_HEIGHT,
 	},
 	container: {
 		flex: 1,
@@ -662,4 +973,173 @@ const styles = {
 	label: {
 		marginBottom: 8,
 	},
-};
+	statusLabel: {
+		marginBottom: 0,
+		fontWeight: "600",
+		color: "#111827",
+	},
+	statusColon: {
+		marginHorizontal: 4,
+		color: "#6b7280",
+	},
+	statusSpacer: {
+		width: 16,
+	},
+	mutedLabel: {
+		color: "#6b7280",
+	},
+	warningText: {
+		color: "#b91c1c",
+	},
+	successText: {
+		color: "#15803d",
+	},
+	setupSuccessRow: {
+		flexDirection: "row",
+		alignItems: "center",
+	},
+	successIcon: {
+		marginRight: 6,
+		color: "#15803d",
+	},
+	primaryButton: {
+		marginTop: 8,
+		borderRadius: 999,
+		backgroundColor: "#111827",
+		paddingVertical: 10,
+		alignItems: "center",
+	},
+	primaryButtonDisabled: {
+		opacity: 0.5,
+	},
+	primaryButtonText: {
+		color: "#f9fafb",
+		fontWeight: "600",
+		fontSize: 16,
+	},
+	code: {
+		fontFamily: "Menlo",
+	},
+	tabBar: {
+		flexDirection: "row",
+		marginHorizontal: 20,
+		marginBottom: 12,
+		backgroundColor: "#e5e7eb",
+		borderRadius: 999,
+		padding: 4,
+	},
+	tabButton: {
+		flex: 1,
+		alignItems: "center",
+		paddingVertical: 8,
+		borderRadius: 999,
+	},
+	tabButtonActive: {
+		backgroundColor: "#111827",
+	},
+	tabButtonLabel: {
+		fontSize: 14,
+		fontWeight: "600",
+		color: "#4b5563",
+	},
+	tabButtonLabelActive: {
+		color: "#f9fafb",
+	},
+	statusRow: {
+		flexDirection: "row",
+		alignItems: "center",
+		marginBottom: 12,
+	},
+	statusBadge: {
+		borderRadius: 999,
+		paddingHorizontal: 8,
+		paddingVertical: 2,
+	},
+	statusBadgeIdle: {
+		backgroundColor: "#e5e7eb",
+	},
+	statusBadgeOk: {
+		backgroundColor: "#bbf7d0",
+	},
+	statusBadgeError: {
+		backgroundColor: "#fecaca",
+	},
+	statusBadgeText: {
+		fontSize: 12,
+		fontWeight: "500",
+		color: "#111827",
+	},
+	segmentRow: {
+		marginBottom: 8,
+	},
+	segmentLine: {
+		flexDirection: "row",
+		alignItems: "baseline",
+	},
+	segmentMeta: {
+		fontSize: 11,
+		color: "#6b7280",
+		marginRight: 8,
+		minWidth: 52,
+	},
+	segmentSpeaker: {
+		fontSize: 11,
+		color: "#6b7280",
+		marginRight: 8,
+	},
+	segmentText: {
+		fontSize: 14,
+		color: "#111827",
+		flexShrink: 1,
+	},
+	segmentTextPartial: {
+		fontSize: 14,
+		color: "#6b7280",
+		fontStyle: "italic",
+	},
+	levelCard: {
+		marginTop: 8,
+	},
+	levelBarBackground: {
+		marginTop: 4,
+		height: 8,
+		borderRadius: 4,
+		backgroundColor: "#e5e7eb",
+		overflow: "hidden",
+		width: "100%",
+	},
+	levelBarFill: {
+		height: "100%",
+		backgroundColor: "#111827",
+	},
+	levelPercent: {
+		marginTop: 4,
+		color: "#6b7280",
+		fontSize: 12,
+	},
+	liveRow: {
+		flexDirection: "row",
+		alignItems: "center",
+		marginHorizontal: 20,
+		marginBottom: 8,
+	},
+	liveDot: {
+		width: 10,
+		height: 10,
+		borderRadius: 5,
+		marginRight: 8,
+	},
+	liveDotOn: {
+		backgroundColor: "#22c55e",
+	},
+	liveDotOff: {
+		backgroundColor: "#9ca3af",
+	},
+	liveTextOn: {
+		color: "#16a34a",
+		fontWeight: "500",
+	},
+	liveTextOff: {
+		color: "#6b7280",
+	},
+});
