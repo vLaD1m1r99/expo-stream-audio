@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android", "web"],
+  "apple": {
+    "modules": ["ExpoStreamAudioModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.streamaudio.ExpoStreamAudioModule"]
+  }
+}

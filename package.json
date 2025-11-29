@@ -1,0 +1,52 @@
+{
+  "name": "expo-stream-audio",
+  "version": "0.1.2",
+  "description": "Module that allows audio stream to utilize realtime audio features, like live transcription",
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
+  "scripts": {
+    "build": "expo-module build",
+    "clean": "expo-module clean",
+    "lint": "expo-module lint",
+    "test": "expo-module test",
+    "prepare": "expo-module prepare",
+    "prepublishOnly": "expo-module prepublishOnly",
+    "expo-module": "expo-module",
+    "open:ios": "xed example/ios",
+    "open:android": "open -a \"Android Studio\" example/android"
+  },
+  "files": [
+    "build",
+    "ios",
+    "android",
+    "src",
+    "expo-module.config.json",
+    "app.plugin.js",
+    "README.md"
+  ],
+  "keywords": [
+    "react-native",
+    "expo",
+    "expo-stream-audio",
+    "ExpoStreamAudio"
+  ],
+  "repository": "https://github.com/vLaD1m1r99/expo-stream-audio",
+  "bugs": {
+    "url": "https://github.com/vLaD1m1r99/expo-stream-audio/issues"
+  },
+  "author": "vLaD1m1r99 <vladastefanovic43@gmail.com> (https://github.com/vLaD1m1r99)",
+  "license": "MIT",
+  "homepage": "https://github.com/vLaD1m1r99/expo-stream-audio#readme",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/react": "~19.1.0",
+    "expo-module-scripts": "^5.0.7",
+    "expo": "^54.0.24",
+    "react-native": "0.81.5"
+  },
+  "peerDependencies": {
+    "expo": "*",
+    "react": "*",
+    "react-native": "*"
+  }
+}
