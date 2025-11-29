@@ -710,39 +710,55 @@ export default function App() {
 						/>
 						<Group name="">
 							<View style={styles.transcriptContainer}>
-								<ScrollView nestedScrollEnabled ref={transcriptScrollRef}>
-									{committedTranscripts.map((segment) => (
-										<View key={segment.id} style={styles.segmentRow}>
-											<View style={styles.segmentLine}>
-												{segment.startSeconds != null && (
-													<Text style={styles.segmentMeta}>
-														{formatSeconds(segment.startSeconds)}
+								{committedTranscripts.length === 0 &&
+								!partialTranscript &&
+								streamStatusLabel !== "recording" ? (
+									<View style={styles.emptyTranscript}>
+										<Text style={[styles.mutedLabel, styles.emptyTranscriptText]}>
+											Start the stream to see the live transcript.
+										</Text>
+										<PrimaryButton
+											title="Start Stream"
+											onPress={handleStart}
+											disabled={!hasApiKey || isStarting}
+											loading={isStarting}
+										/>
+									</View>
+								) : (
+									<ScrollView nestedScrollEnabled ref={transcriptScrollRef}>
+										{committedTranscripts.map((segment) => (
+											<View key={segment.id} style={styles.segmentRow}>
+												<View style={styles.segmentLine}>
+													{segment.startSeconds != null && (
+														<Text style={styles.segmentMeta}>
+															{formatSeconds(segment.startSeconds)}
+														</Text>
+													)}
+													{segment.speakerId != null && (
+														<Text style={styles.segmentSpeaker}>
+															{formatSpeaker(segment.speakerId)}
+														</Text>
+													)}
+													<Text style={styles.segmentText}>
+														{segment.text}
 													</Text>
-												)}
-												{segment.speakerId != null && (
-													<Text style={styles.segmentSpeaker}>
-														{formatSpeaker(segment.speakerId)}
+												</View>
+											</View>
+										))}
+
+										{partialTranscript ? (
+											<View style={styles.segmentRow}>
+												<View style={styles.segmentLine}>
+													<Text style={styles.segmentTextPartial}>
+														{partialTranscript}
 													</Text>
-												)}
-												<Text style={styles.segmentText}>{segment.text}</Text>
+												</View>
 											</View>
-										</View>
-									))}
-
-									{partialTranscript ? (
-										<View style={styles.segmentRow}>
-											<View style={styles.segmentLine}>
-												<Text style={styles.segmentTextPartial}>
-													{partialTranscript}
-												</Text>
-											</View>
-										</View>
-									) : null}
-
-									{committedTranscripts.length === 0 && !partialTranscript ? (
-										<Text style={styles.mutedLabel}>No transcript yet.</Text>
-									) : null}
-								</ScrollView>
+										) : streamStatusLabel === "recording" ? (
+											<Text style={styles.segmentTextPartial}>Listening…</Text>
+										) : null}
+									</ScrollView>
+								)}
 							</View>
 						</Group>
 					</>
@@ -1008,6 +1024,7 @@ const styles = StyleSheet.create({
 		backgroundColor: "#111827",
 		paddingVertical: 10,
 		alignItems: "center",
+		alignSelf: "stretch",
 	},
 	primaryButtonDisabled: {
 		opacity: 0.5,
@@ -1096,6 +1113,15 @@ const styles = StyleSheet.create({
 		fontSize: 14,
 		color: "#6b7280",
 		fontStyle: "italic",
+	},
+	emptyTranscript: {
+		flex: 1,
+		alignItems: "stretch",
+		justifyContent: "center",
+		gap: 8,
+	},
+	emptyTranscriptText: {
+		textAlign: "center",
 	},
 	levelCard: {
 		marginTop: 8,
