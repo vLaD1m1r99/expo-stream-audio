@@ -182,24 +182,31 @@ public class ExpoStreamAudioModule: Module {
       }
     }
 
-    AsyncFunction("start") { (options: [String: Any]) in
+    AsyncFunction("start") { (options: [String: Any]) async throws in
       if self.isRecording {
         return
       }
 
       // Ensure permission
-      let permission = self.audioSession.recordPermission
-      if permission == .denied {
-        self.sendError("Microphone permission denied.")
-        return
-      }
+      var permission = self.audioSession.recordPermission
 
       if permission == .undetermined {
-        await withCheckedContinuation { continuation in
-          self.audioSession.requestRecordPermission { _ in
-            continuation.resume()
+        let granted = await withCheckedContinuation { continuation in
+          self.audioSession.requestRecordPermission { granted in
+            continuation.resume(returning: granted)
           }
         }
+        permission = granted ? .granted : .denied
+      }
+
+      if permission == .denied {
+        let message = "Microphone permission denied."
+        self.sendError(message)
+        throw NSError(
+          domain: "ExpoStreamAudio",
+          code: 1,
+          userInfo: [NSLocalizedDescriptionKey: message]
+        )
       }
 
       self.frameDurationMs = (options["frameDurationMs"] as? Double) ?? DEFAULT_FRAME_DURATION_MS
@@ -217,7 +224,7 @@ public class ExpoStreamAudioModule: Module {
         self.maxBufferedMinutes = DEFAULT_MAX_BUFFERED_MINUTES
       }
 
-      await self.startRecordingInternal(options: options)
+      try await self.startRecordingInternal(options: options)
     }
 
     AsyncFunction("stop") {
@@ -258,7 +265,7 @@ public class ExpoStreamAudioModule: Module {
 
   // MARK: - Internal helpers
 
-  private func startRecordingInternal(options: [String: Any]) async {
+  private func startRecordingInternal(options: [String: Any]) async throws {
     do {
       try audioSession.setCategory(.record, mode: .voiceChat, options: [])
 
@@ -268,8 +275,13 @@ public class ExpoStreamAudioModule: Module {
 
       try audioSession.setActive(true)
     } catch {
-      sendError("Failed to configure audio session: \(error.localizedDescription)")
-      return
+      let message = "Failed to configure audio session: \(error.localizedDescription)"
+      sendError(message)
+      throw NSError(
+        domain: "ExpoStreamAudio",
+        code: 2,
+        userInfo: [NSLocalizedDescriptionKey: message]
+      )
     }
 
     let inputNode = audioEngine.inputNode
@@ -292,9 +304,15 @@ public class ExpoStreamAudioModule: Module {
       try audioEngine.start()
       isRecording = true
     } catch {
-      sendError("Failed to start audio engine: \(error.localizedDescription)")
+      let message = "Failed to start audio engine: \(error.localizedDescription)"
+      sendError(message)
       inputNode.removeTap(onBus: 0)
       isRecording = false
+      throw NSError(
+        domain: "ExpoStreamAudio",
+        code: 3,
+        userInfo: [NSLocalizedDescriptionKey: message]
+      )
     }
   }
 

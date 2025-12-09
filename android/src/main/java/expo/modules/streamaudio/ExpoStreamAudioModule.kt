@@ -8,6 +8,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import androidx.core.content.ContextCompat
+import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -187,14 +188,16 @@ class ExpoStreamAudioModule : Module() {
 
       val context = appContext.reactContext
       if (context == null) {
-        sendError("React context is null.")
-        return@AsyncFunction
+        val message = "React context is null."
+        sendError(message)
+        throw CodedException(message)
       }
 
       val permissionStatus = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
       if (permissionStatus != PackageManager.PERMISSION_GRANTED) {
-        sendError("Microphone permission not granted.")
-        return@AsyncFunction
+        val message = "Microphone permission not granted."
+        sendError(message)
+        throw CodedException(message)
       }
 
       val requestedSampleRate = (options["sampleRate"] as? Number)?.toInt()
@@ -215,8 +218,9 @@ class ExpoStreamAudioModule : Module() {
       )
 
       if (minBufferSize <= 0) {
-        sendError("Failed to determine buffer size for sample rate $sampleRate.")
-        return@AsyncFunction
+        val message = "Failed to determine buffer size for sample rate $sampleRate."
+        sendError(message)
+        throw CodedException(message)
       }
 
       val bytesPerFrame = 2 // PCM 16‑bit mono
@@ -254,10 +258,11 @@ class ExpoStreamAudioModule : Module() {
       audioRecord = createdRecord
 
       if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-        sendError("AudioRecord failed to initialize.")
+        val message = "AudioRecord failed to initialize."
+        sendError(message)
         audioRecord?.release()
         audioRecord = null
-        return@AsyncFunction
+        throw CodedException(message)
       }
 
       if (enableBackground) {
